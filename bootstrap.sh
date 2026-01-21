@@ -126,8 +126,9 @@ expand_root_prep() {
   wget -U "" -O expand-root.sh "https://openwrt.org/_export/code/docs/guide-user/advanced/expand_root?codeblock=0"
   # shellcheck disable=SC1091
   . ./expand-root.sh
-  [ -x /etc/uci-defaults/70-rootpt-resize ] || fail "Не найден /etc/uci-defaults/70-rootpt-resize после подготовки expand-root."
-  done_ "Подготовлен expand-root (uci-defaults/70-rootpt-resize готов)"
+[ -f /etc/uci-defaults/70-rootpt-resize ] || fail "Не найден /etc/uci-defaults/70-rootpt-resize после подготовки expand-root."
+chmod +x /etc/uci-defaults/70-rootpt-resize 2>/dev/null || true
+done_ "Подготовлен expand-root (uci-defaults/70-rootpt-resize готов)"
 }
 
 expand_root_run_and_reboot() {
