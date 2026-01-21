@@ -6,20 +6,35 @@ CONF="/etc/r5s-bootstrap.conf"
 LOG="/root/r5s-bootstrap.log"
 
 GREEN="\033[1;32m"; RED="\033[1;31m"; YELLOW="\033[1;33m"; NC="\033[0m"
+TTY="/dev/tty"
 
-say()  { printf "%b\n" "$*"; }
-done_(){ say "${GREEN}DONE${NC}  $*"; sleep 5; }
-warn(){ say "${YELLOW}WARN${NC}  $*"; sleep 5; }
-fail(){ say "${RED}FAIL${NC}  $*"; exit 1; }
-
-log(){ echo "[$(date +'%F %T')] $*" >> "$LOG"; }
+say()   { printf "%b\n" "$*"; }
+done_() { say "${GREEN}DONE${NC}  $*"; sleep 5; }
+warn()  { say "${YELLOW}WARN${NC}  $*"; sleep 5; }
+fail()  { say "${RED}FAIL${NC}  $*"; exit 1; }
+log()   { echo "[$(date +'%F %T')] $*" >> "$LOG"; }
 
 get_state(){ [ -f "$STATE" ] && cat "$STATE" || echo "0"; }
 set_state(){ echo "$1" > "$STATE"; sync; }
 
-need_conf(){ [ ! -f "$CONF" ]; }
+# Чтение всегда из tty (чтобы работало даже при `wget -O- ... | sh`)
+ask() {
+  # ask "Prompt" VAR "default"
+  prompt="$1"; var="$2"; def="${3:-}"
+  if [ -r "$TTY" ]; then
+    [ -n "$def" ] && printf "%s [%s]: " "$prompt" "$def" > "$TTY" || printf "%s: " "$prompt" > "$TTY"
+    IFS= read -r ans < "$TTY" || ans=""
+  else
+    # fallback (если нет tty)
+    [ -n "$def" ] && printf "%s [%s]: " "$prompt" "$def" || printf "%s: " "$prompt"
+    IFS= read -r ans || ans=""
+  fi
+  [ -z "$ans" ] && ans="$def"
+  eval "$var=\$ans"
+}
 
-# ---------- меню (запускается один раз, если конфига нет) ----------
+uciq(){ uci -q "$@"; }
+
 menu() {
   say ""
   say "Выбери конфигурацию:"
@@ -27,27 +42,21 @@ menu() {
   say "1) Podkop"
   say "2) Podkop + WireGuard Private"
   say "3) Доустановить WireGuard Private к Podkop"
-  printf "Ввод (0/1/2/3): "
-  read -r MODE
+  ask "Ввод (0/1/2/3)" MODE "2"
 
-  case "$MODE" in
-    0|1|2|3) ;;
-    *) fail "Неверный выбор" ;;
-  esac
+  case "$MODE" in 0|1|2|3) ;; *) fail "Неверный выбор MODE=$MODE" ;; esac
 
   VLESS=""
-  LIST_RU=0; LIST_CF=0; LIST_META=0
+  LIST_RU="1"; LIST_CF="1"; LIST_META="1"; LIST_GOOGLE_AI="0"
 
-  if [ "$MODE" = "2" ]; then
+  if [ "$MODE" = "1" ] || [ "$MODE" = "2" ]; then
+    ask "Вставь строку VLESS (одной строкой)" VLESS ""
     say ""
-    say "Вставь строку VLESS (одной строкой):"
-    read -r VLESS
-
-    say ""
-    say "Выбери списки блокировок (0/1):"
-    printf "Russian inside (0/1): "; read -r LIST_RU
-    printf "Cloudflare (0/1): ";     read -r LIST_CF
-    printf "Meta (0/1): ";           read -r LIST_META
+    say "Списки (community_lists) — 0/1:"
+    ask "russia_inside" LIST_RU "1"
+    ask "cloudflare"   LIST_CF "1"
+    ask "meta"         LIST_META "1"
+    ask "google_ai"    LIST_GOOGLE_AI "0"
   fi
 
   cat > "$CONF" <<EOF
@@ -56,11 +65,17 @@ VLESS=$VLESS
 LIST_RU=$LIST_RU
 LIST_CF=$LIST_CF
 LIST_META=$LIST_META
+LIST_GOOGLE_AI=$LIST_GOOGLE_AI
 EOF
   done_ "Параметры сохранены в $CONF"
 }
 
-# ---------- префлайт ----------
+load_conf() {
+  [ -f "$CONF" ] || menu
+  # shellcheck disable=SC1090
+  . "$CONF"
+}
+
 check_openwrt() {
   rel="$(. /etc/openwrt_release; echo "$DISTRIB_RELEASE" 2>/dev/null || true)"
   echo "$rel" | grep -q "^24\.10" || fail "Нужен OpenWrt 24.10.x (сейчас: ${rel:-unknown})."
@@ -91,35 +106,173 @@ opkg_base() {
   done_ "Базовые пакеты установлены"
 }
 
-# ---------- Podkop ----------
 install_podkop() {
-  # На ash используем pipe вместо <( ... )  [oai_citation:4‡podkop.net](https://podkop.net/docs/install/?utm_source=chatgpt.com)
+  # На OpenWrt ash корректно так (у podkop пакет на ash)  [oai_citation:2‡podkop.net](https://podkop.net/docs/install/?utm_source=chatgpt.com)
   wget -qO- "https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh" | sh
   done_ "Podkop установлен/обновлён"
 }
 
-# Заглушки — добавим после того, как ты дашь “эталонные” конфиги/ключи
-configure_podkop() {
-  . "$CONF"
-  done_ "Настройка Podkop (пока заглушка — сделаем по твоему эталону/uci)"
+configure_podkop_full() {
+  # Создаём/обновляем секции как в твоём примере
+  uciq get podkop.settings >/dev/null || uciq set podkop.settings='settings'
+  uciq set podkop.settings.dns_type='doh'
+  uciq set podkop.settings.dns_server='1.1.1.1'
+  uciq set podkop.settings.bootstrap_dns_server='77.88.8.8'
+  uciq set podkop.settings.dns_rewrite_ttl='60'
+  uciq set podkop.settings.enable_output_network_interface='0'
+  uciq set podkop.settings.enable_badwan_interface_monitoring='0'
+  uciq set podkop.settings.enable_yacd='0'
+  uciq set podkop.settings.disable_quic='0'
+  uciq set podkop.settings.update_interval='1d'
+  uciq set podkop.settings.download_lists_via_proxy='0'
+  uciq set podkop.settings.dont_touch_dhcp='0'
+  uciq set podkop.settings.config_path='/etc/sing-box/config.json'
+  uciq set podkop.settings.cache_path='/tmp/sing-box/cache.db'
+  uciq set podkop.settings.exclude_ntp='0'
+  uciq set podkop.settings.shutdown_correctly='0'
+
+  # source_network_interfaces: всегда br-lan, а wg0 — если режим включает WG
+  uciq -q del podkop.settings.source_network_interfaces
+  uciq add_list podkop.settings.source_network_interfaces='br-lan'
+  if [ "$MODE" = "2" ] || [ "$MODE" = "3" ]; then
+    uciq add_list podkop.settings.source_network_interfaces='wg0'
+  fi
+
+  # main секция
+  uciq get podkop.main >/dev/null || uciq set podkop.main='section'
+  uciq set podkop.main.connection_type='proxy'
+  uciq set podkop.main.proxy_config_type='url'
+  uciq set podkop.main.enable_udp_over_tcp='0'
+  uciq set podkop.main.proxy_string="$VLESS"
+  uciq set podkop.main.user_domain_list_type='dynamic'
+  uciq set podkop.main.user_subnet_list_type='disabled'
+  uciq set podkop.main.mixed_proxy_enabled='0'
+
+  # community_lists — строго по выбору
+  uciq -q del podkop.main.community_lists
+  [ "${LIST_RU:-0}" = "1" ] && uciq add_list podkop.main.community_lists='russia_inside'
+  [ "${LIST_CF:-0}" = "1" ] && uciq add_list podkop.main.community_lists='cloudflare'
+  [ "${LIST_META:-0}" = "1" ] && uciq add_list podkop.main.community_lists='meta'
+  [ "${LIST_GOOGLE_AI:-0}" = "1" ] && uciq add_list podkop.main.community_lists='google_ai'
+
+  uciq commit podkop
+  /etc/init.d/podkop restart >/dev/null 2>&1 || true
+  done_ "Podkop настроен и перезапущен"
 }
 
-# ---------- WireGuard ----------
+patch_podkop_add_wg0_only() {
+  # Для режима 3: не трогаем VLESS/листы, только добавляем wg0 в source_network_interfaces
+  uciq get podkop.settings >/dev/null || uciq set podkop.settings='settings'
+  # Добавим wg0, если ещё нет
+  if ! uci -q get podkop.settings.source_network_interfaces 2>/dev/null | grep -q 'wg0'; then
+    uciq add_list podkop.settings.source_network_interfaces='wg0'
+    uciq commit podkop
+    /etc/init.d/podkop restart >/dev/null 2>&1 || true
+  fi
+  done_ "Podkop: wg0 добавлен в source_network_interfaces"
+}
+
 install_wireguard() {
   opkg update
   opkg install kmod-wireguard wireguard-tools luci-app-wireguard qrencode
   done_ "WireGuard + QR установлены"
 }
-configure_wireguard() {
-  done_ "Настройка WireGuard (пока заглушка — добавим генерацию peer + QR)"
+
+configure_wireguard_server() {
+  # Базовый сервер wg0 (10.7.0.1/24, порт 51820)
+  mkdir -p /etc/wireguard
+  if [ ! -f /etc/wireguard/server.key ]; then
+    umask 077
+    wg genkey | tee /etc/wireguard/server.key | wg pubkey > /etc/wireguard/server.pub
+  fi
+
+  uciq set network.wg0='interface'
+  uciq set network.wg0.proto='wireguard'
+  uciq set network.wg0.private_key="$(cat /etc/wireguard/server.key)"
+  uciq set network.wg0.listen_port='51820'
+  uciq -q del network.wg0.addresses
+  uciq add_list network.wg0.addresses='10.7.0.1/24'
+  uciq commit network
+
+  # firewall zone + allow inbound + forwarding wg -> wan
+  uciq set firewall.wg='zone'
+  uciq set firewall.wg.name='wg'
+  uciq set firewall.wg.input='ACCEPT'
+  uciq set firewall.wg.output='ACCEPT'
+  uciq set firewall.wg.forward='ACCEPT'
+  uciq -q del firewall.wg.network
+  uciq add_list firewall.wg.network='wg0'
+
+  uciq set firewall.wg_in='rule'
+  uciq set firewall.wg_in.name='Allow-WireGuard-Inbound'
+  uciq set firewall.wg_in.src='wan'
+  uciq set firewall.wg_in.proto='udp'
+  uciq set firewall.wg_in.dest_port='51820'
+  uciq set firewall.wg_in.target='ACCEPT'
+
+  uciq set firewall.wg_wan='forwarding'
+  uciq set firewall.wg_wan.src='wg'
+  uciq set firewall.wg_wan.dest='wan'
+
+  uciq commit firewall
+  /etc/init.d/network restart >/dev/null 2>&1 || true
+  /etc/init.d/firewall restart >/dev/null 2>&1 || true
+
+  done_ "WireGuard сервер wg0 настроен"
+  # QR-коды — опционально. OpenWrt wiki тоже рекомендует qrencode как опцию.  [oai_citation:3‡openwrt.org](https://openwrt.org/docs/guide-user/services/vpn/wireguard/server?utm_source=chatgpt.com)
 }
 
-# ---------- main ----------
+create_peer() {
+  # create_peer "peer1" "10.7.0.2/32"
+  name="$1"; ip="$2"
+  dir="/etc/wireguard/clients"
+  mkdir -p "$dir"
+
+  umask 077
+  priv="$(wg genkey)"
+  pub="$(printf "%s" "$priv" | wg pubkey)"
+  psk="$(wg genpsk)"
+
+  # Добавляем peer в UCI
+  sec="$(uci add network wireguard_wg0)"
+  uciq set "network.$sec.public_key=$pub"
+  uciq set "network.$sec.preshared_key=$psk"
+  uciq add_list "network.$sec.allowed_ips=$ip"
+  uciq set "network.$sec.description=$name"
+  uciq commit network
+  /etc/init.d/network restart >/dev/null 2>&1 || true
+
+  # Endpoint спрашиваем (внешний IP/домен)
+  if [ -z "${WG_ENDPOINT:-}" ]; then
+    ask "Endpoint (например: example.com:51820)" WG_ENDPOINT ""
+  fi
+
+  cat > "$dir/$name.conf" <<EOF
+[Interface]
+PrivateKey = $priv
+Address = ${ip%/32}/24
+DNS = 1.1.1.1
+
+[Peer]
+PublicKey = $(cat /etc/wireguard/server.pub)
+PresharedKey = $psk
+Endpoint = $WG_ENDPOINT
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+
+  say ""
+  say "${GREEN}QR (ANSI) для $name:${NC}"
+  qrencode -t ansiutf8 < "$dir/$name.conf" || true
+  done_ "Peer $name создан: $dir/$name.conf"
+}
+
 main() {
   [ -f "$CONF" ] || menu
+  load_conf
 
   st="$(get_state)"
-  log "state=$st"
+  log "state=$st mode=$MODE"
 
   [ "$st" -lt 10 ] && check_openwrt && set_state 10
   [ "$st" -lt 20 ] && check_space  && set_state 20
@@ -127,19 +280,33 @@ main() {
   [ "$st" -lt 40 ] && sync_time    && set_state 40
   [ "$st" -lt 50 ] && opkg_base    && set_state 50
 
-  . "$CONF"
   if [ "$MODE" = "1" ] || [ "$MODE" = "2" ]; then
-    [ "$st" -lt 60 ] && install_podkop    && set_state 60
-    [ "$st" -lt 70 ] && configure_podkop  && set_state 70
+    [ "$st" -lt 60 ] && install_podkop        && set_state 60
+    [ "$st" -lt 70 ] && configure_podkop_full && set_state 70
   fi
 
   if [ "$MODE" = "2" ] || [ "$MODE" = "3" ]; then
-    [ "$st" -lt 80 ] && install_wireguard   && set_state 80
-    [ "$st" -lt 90 ] && configure_wireguard && set_state 90
+    [ "$st" -lt 80 ] && install_wireguard         && set_state 80
+    [ "$st" -lt 90 ] && configure_wireguard_server && set_state 90
+    # для режима 3 — мягко допатчим podkop, чтобы wg0 тоже ходил через подкоп
+    [ "$MODE" = "3" ] && [ "$st" -lt 95 ] && patch_podkop_add_wg0_only && set_state 95
+
+    # peers / QR
+    if [ "$st" -lt 100 ]; then
+      ask "Сколько клиентов WireGuard создать сейчас?" PEERS "1"
+      i=1
+      while [ "$i" -le "$PEERS" ]; do
+        name="peer$i"
+        ip="10.7.0.$((i+1))/32"
+        create_peer "$name" "$ip"
+        i=$((i+1))
+      done
+      set_state 100
+    fi
   fi
 
-  done_ "Готово. State=$st → $(get_state). Логи: $LOG"
-  say "Если был ребут — просто запусти эту же команду ещё раз, продолжит с state=$(get_state)."
+  done_ "Готово. State=$(get_state). Логи: $LOG"
+  say "Если был ребут — просто запусти тот же скрипт снова, он продолжит."
 }
 
 main
