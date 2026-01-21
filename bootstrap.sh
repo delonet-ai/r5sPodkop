@@ -1,15 +1,20 @@
 #!/bin/sh
+# r5sPodkop bootstrap: packages -> expand-root (reboot) -> podkop -> wireguard -> peers+QR
+# Designed for OpenWrt 24.10.x on NanoPi R5S/R5C
+# Usage (GitHub): wget -qO- "https://raw.githubusercontent.com/delonet-ai/r5sPodkop/main/bootstrap.sh" | sh
+
 set -e
 
 STATE="/etc/r5s-bootstrap.state"
 CONF="/etc/r5s-bootstrap.conf"
 LOG="/root/r5s-bootstrap.log"
+TTY="/dev/tty"
 
 GREEN="\033[1;32m"; RED="\033[1;31m"; YELLOW="\033[1;33m"; NC="\033[0m"
-TTY="/dev/tty"
 
 say()   { printf "%b\n" "$*"; }
 done_() { say "${GREEN}DONE${NC}  $*"; sleep 5; }
+info()  { say "${YELLOW}INFO${NC}  $*"; }
 warn()  { say "${YELLOW}WARN${NC}  $*"; sleep 5; }
 fail()  { say "${RED}FAIL${NC}  $*"; exit 1; }
 log()   { echo "[$(date +'%F %T')] $*" >> "$LOG"; }
@@ -17,7 +22,7 @@ log()   { echo "[$(date +'%F %T')] $*" >> "$LOG"; }
 get_state(){ [ -f "$STATE" ] && cat "$STATE" || echo "0"; }
 set_state(){ echo "$1" > "$STATE"; sync; }
 
-# Чтение всегда из tty (чтобы работало даже при `wget -O- ... | sh`)
+# Read from /dev/tty so menu works even when script is piped: wget -O- ... | sh
 ask() {
   # ask "Prompt" VAR "default"
   prompt="$1"; var="$2"; def="${3:-}"
@@ -25,7 +30,6 @@ ask() {
     [ -n "$def" ] && printf "%s [%s]: " "$prompt" "$def" > "$TTY" || printf "%s: " "$prompt" > "$TTY"
     IFS= read -r ans < "$TTY" || ans=""
   else
-    # fallback (если нет tty)
     [ -n "$def" ] && printf "%s [%s]: " "$prompt" "$def" || printf "%s: " "$prompt"
     IFS= read -r ans || ans=""
   fi
@@ -35,19 +39,19 @@ ask() {
 
 uciq(){ uci -q "$@"; }
 
+# -------------------- MENU --------------------
 menu() {
   say ""
   say "Выбери конфигурацию:"
-  say "0) Basic setup"
+  say "0) Basic setup (пакеты + expand-root)"
   say "1) Podkop"
   say "2) Podkop + WireGuard Private"
   say "3) Доустановить WireGuard Private к Podkop"
   ask "Ввод (0/1/2/3)" MODE "2"
-
   case "$MODE" in 0|1|2|3) ;; *) fail "Неверный выбор MODE=$MODE" ;; esac
 
   VLESS=""
-  LIST_RU="1"; LIST_CF="1"; LIST_META="1"; LIST_GOOGLE_AI="0"
+  LIST_RU="1"; LIST_CF="1"; LIST_META="1"; LIST_GOOGLE_AI="1"
 
   if [ "$MODE" = "1" ] || [ "$MODE" = "2" ]; then
     ask "Вставь строку VLESS (одной строкой)" VLESS ""
@@ -56,8 +60,11 @@ menu() {
     ask "russia_inside" LIST_RU "1"
     ask "cloudflare"   LIST_CF "1"
     ask "meta"         LIST_META "1"
-    ask "google_ai"    LIST_GOOGLE_AI "0"
+    ask "google_ai"    LIST_GOOGLE_AI "1"
   fi
+
+  # WireGuard endpoint for peer configs (optional, asked later if empty)
+  WG_ENDPOINT=""
 
   cat > "$CONF" <<EOF
 MODE=$MODE
@@ -66,6 +73,7 @@ LIST_RU=$LIST_RU
 LIST_CF=$LIST_CF
 LIST_META=$LIST_META
 LIST_GOOGLE_AI=$LIST_GOOGLE_AI
+WG_ENDPOINT=$WG_ENDPOINT
 EOF
   done_ "Параметры сохранены в $CONF"
 }
@@ -76,21 +84,16 @@ load_conf() {
   . "$CONF"
 }
 
+# -------------------- PREFLIGHT --------------------
 check_openwrt() {
-  rel="$(. /etc/openwrt_release; echo "$DISTRIB_RELEASE" 2>/dev/null || true)"
+  rel="$(. /etc/openwrt_release 2>/dev/null; echo "$DISTRIB_RELEASE" 2>/dev/null || true)"
   echo "$rel" | grep -q "^24\.10" || fail "Нужен OpenWrt 24.10.x (сейчас: ${rel:-unknown})."
   done_ "OpenWrt версия: $rel"
 }
 
-check_space() {
-  free_kb="$(df -k /overlay 2>/dev/null | awk 'NR==2 {print $4}')"
-  [ -n "$free_kb" ] || fail "Не вижу /overlay"
-  [ "$free_kb" -ge 20480 ] || fail "Мало места в /overlay: $((free_kb/1024))MB. Нужно ≥20MB."
-  done_ "Свободно /overlay: $((free_kb/1024)) MB"
-}
-
 check_inet() {
   ping -c1 -W2 1.1.1.1 >/dev/null 2>&1 || fail "Нет интернета (ping 1.1.1.1)."
+  # DNS+TLS: important for opkg + https downloads
   wget -q --spider https://downloads.openwrt.org/ || fail "Нет DNS/TLS (wget https://downloads.openwrt.org)."
   done_ "Интернет + HTTPS OK"
 }
@@ -100,20 +103,51 @@ sync_time() {
   done_ "Время проверено"
 }
 
-opkg_base() {
+# -------------------- PACKAGES (YOUR FULL LIST) --------------------
+install_full_pkg_list() {
   opkg update
-  opkg install ca-bundle ca-certificates wget-ssl curl nano-full
-  done_ "Базовые пакеты установлены"
+  # Your list + wget-ssl (needed for https fetching reliably)
+  opkg install \
+    parted losetup resize2fs blkid e2fsprogs block-mount fstrim tune2fs \
+    ca-bundle ca-certificates wget-ssl curl nano-full tcpdump kmod-nft-tproxy ss
+  done_ "Установлен полный список пакетов"
 }
 
+check_space_overlay() {
+  free_kb="$(df -k /overlay 2>/dev/null | awk 'NR==2 {print $4}')"
+  [ -n "$free_kb" ] || fail "Не вижу /overlay"
+  done_ "Свободно /overlay: $((free_kb/1024)) MB"
+}
+
+# -------------------- EXPAND ROOT --------------------
+expand_root_prep() {
+  cd /root
+  rm -f /root/expand-root.sh 2>/dev/null || true
+  wget -U "" -O expand-root.sh "https://openwrt.org/_export/code/docs/guide-user/advanced/expand_root?codeblock=0"
+  # shellcheck disable=SC1091
+  . ./expand-root.sh
+  [ -x /etc/uci-defaults/70-rootpt-resize ] || fail "Не найден /etc/uci-defaults/70-rootpt-resize после подготовки expand-root."
+  done_ "Подготовлен expand-root (uci-defaults/70-rootpt-resize готов)"
+}
+
+expand_root_run_and_reboot() {
+  # This script typically triggers a reboot itself; we reboot anyway after marking progress.
+  sh /etc/uci-defaults/70-rootpt-resize || true
+  done_ "Запущен expand-root. Сейчас будет ребут. После загрузки запусти скрипт снова."
+  reboot
+}
+
+# -------------------- PODKOP --------------------
 install_podkop() {
-  # На OpenWrt ash корректно так (у podkop пакет на ash)  [oai_citation:2‡podkop.net](https://podkop.net/docs/install/?utm_source=chatgpt.com)
+  # Use pipe for ash (not bash process substitution)
   wget -qO- "https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh" | sh
   done_ "Podkop установлен/обновлён"
 }
 
 configure_podkop_full() {
-  # Создаём/обновляем секции как в твоём примере
+  [ -n "${VLESS:-}" ] || fail "VLESS пустой. Запусти скрипт заново и введи VLESS (MODE 1/2)."
+
+  # settings section
   uciq get podkop.settings >/dev/null || uciq set podkop.settings='settings'
   uciq set podkop.settings.dns_type='doh'
   uciq set podkop.settings.dns_server='1.1.1.1'
@@ -131,14 +165,14 @@ configure_podkop_full() {
   uciq set podkop.settings.exclude_ntp='0'
   uciq set podkop.settings.shutdown_correctly='0'
 
-  # source_network_interfaces: всегда br-lan, а wg0 — если режим включает WG
+  # source_network_interfaces: br-lan always; wg0 if WG enabled
   uciq -q del podkop.settings.source_network_interfaces
   uciq add_list podkop.settings.source_network_interfaces='br-lan'
   if [ "$MODE" = "2" ] || [ "$MODE" = "3" ]; then
     uciq add_list podkop.settings.source_network_interfaces='wg0'
   fi
 
-  # main секция
+  # main section
   uciq get podkop.main >/dev/null || uciq set podkop.main='section'
   uciq set podkop.main.connection_type='proxy'
   uciq set podkop.main.proxy_config_type='url'
@@ -148,12 +182,12 @@ configure_podkop_full() {
   uciq set podkop.main.user_subnet_list_type='disabled'
   uciq set podkop.main.mixed_proxy_enabled='0'
 
-  # community_lists — строго по выбору
+  # community_lists from menu
   uciq -q del podkop.main.community_lists
-  [ "${LIST_RU:-0}" = "1" ] && uciq add_list podkop.main.community_lists='russia_inside'
-  [ "${LIST_CF:-0}" = "1" ] && uciq add_list podkop.main.community_lists='cloudflare'
-  [ "${LIST_META:-0}" = "1" ] && uciq add_list podkop.main.community_lists='meta'
-  [ "${LIST_GOOGLE_AI:-0}" = "1" ] && uciq add_list podkop.main.community_lists='google_ai'
+  [ "${LIST_RU:-0}" = "1" ]       && uciq add_list podkop.main.community_lists='russia_inside'
+  [ "${LIST_CF:-0}" = "1" ]       && uciq add_list podkop.main.community_lists='cloudflare'
+  [ "${LIST_META:-0}" = "1" ]     && uciq add_list podkop.main.community_lists='meta'
+  [ "${LIST_GOOGLE_AI:-0}" = "1" ]&& uciq add_list podkop.main.community_lists='google_ai'
 
   uciq commit podkop
   /etc/init.d/podkop restart >/dev/null 2>&1 || true
@@ -161,9 +195,8 @@ configure_podkop_full() {
 }
 
 patch_podkop_add_wg0_only() {
-  # Для режима 3: не трогаем VLESS/листы, только добавляем wg0 в source_network_interfaces
+  # MODE=3: only add wg0 to source interfaces (do not touch VLESS/lists)
   uciq get podkop.settings >/dev/null || uciq set podkop.settings='settings'
-  # Добавим wg0, если ещё нет
   if ! uci -q get podkop.settings.source_network_interfaces 2>/dev/null | grep -q 'wg0'; then
     uciq add_list podkop.settings.source_network_interfaces='wg0'
     uciq commit podkop
@@ -172,6 +205,7 @@ patch_podkop_add_wg0_only() {
   done_ "Podkop: wg0 добавлен в source_network_interfaces"
 }
 
+# -------------------- WIREGUARD --------------------
 install_wireguard() {
   opkg update
   opkg install kmod-wireguard wireguard-tools luci-app-wireguard qrencode
@@ -179,7 +213,6 @@ install_wireguard() {
 }
 
 configure_wireguard_server() {
-  # Базовый сервер wg0 (10.7.0.1/24, порт 51820)
   mkdir -p /etc/wireguard
   if [ ! -f /etc/wireguard/server.key ]; then
     umask 077
@@ -218,8 +251,7 @@ configure_wireguard_server() {
   /etc/init.d/network restart >/dev/null 2>&1 || true
   /etc/init.d/firewall restart >/dev/null 2>&1 || true
 
-  done_ "WireGuard сервер wg0 настроен"
-  # QR-коды — опционально. OpenWrt wiki тоже рекомендует qrencode как опцию.  [oai_citation:3‡openwrt.org](https://openwrt.org/docs/guide-user/services/vpn/wireguard/server?utm_source=chatgpt.com)
+  done_ "WireGuard сервер wg0 настроен (порт 51820, 10.7.0.1/24)"
 }
 
 create_peer() {
@@ -233,7 +265,6 @@ create_peer() {
   pub="$(printf "%s" "$priv" | wg pubkey)"
   psk="$(wg genpsk)"
 
-  # Добавляем peer в UCI
   sec="$(uci add network wireguard_wg0)"
   uciq set "network.$sec.public_key=$pub"
   uciq set "network.$sec.preshared_key=$psk"
@@ -242,9 +273,11 @@ create_peer() {
   uciq commit network
   /etc/init.d/network restart >/dev/null 2>&1 || true
 
-  # Endpoint спрашиваем (внешний IP/домен)
+  # Endpoint asked once (stored in CONF) unless already present
   if [ -z "${WG_ENDPOINT:-}" ]; then
-    ask "Endpoint (например: example.com:51820)" WG_ENDPOINT ""
+    ask "Endpoint для клиентов (например: my.domain.com:51820)" WG_ENDPOINT ""
+    # persist back to CONF
+    sed -i "s/^WG_ENDPOINT=.*/WG_ENDPOINT=$WG_ENDPOINT/" "$CONF" 2>/dev/null || true
   fi
 
   cat > "$dir/$name.conf" <<EOF
@@ -267,6 +300,7 @@ EOF
   done_ "Peer $name создан: $dir/$name.conf"
 }
 
+# -------------------- MAIN --------------------
 main() {
   [ -f "$CONF" ] || menu
   load_conf
@@ -274,25 +308,45 @@ main() {
   st="$(get_state)"
   log "state=$st mode=$MODE"
 
+  # --- preflight
   [ "$st" -lt 10 ] && check_openwrt && set_state 10
-  [ "$st" -lt 20 ] && check_space  && set_state 20
-  [ "$st" -lt 30 ] && check_inet   && set_state 30
-  [ "$st" -lt 40 ] && sync_time    && set_state 40
-  [ "$st" -lt 50 ] && opkg_base    && set_state 50
+  [ "$st" -lt 20 ] && check_inet   && set_state 20
+  [ "$st" -lt 30 ] && sync_time    && set_state 30
 
-  if [ "$MODE" = "1" ] || [ "$MODE" = "2" ]; then
-    [ "$st" -lt 60 ] && install_podkop        && set_state 60
-    [ "$st" -lt 70 ] && configure_podkop_full && set_state 70
+  # --- install FULL package list first (as requested)
+  if [ "$st" -lt 40 ]; then
+    if install_full_pkg_list; then
+      set_state 40
+    else
+      warn "Установка пакетов упала (часто из-за места). Всё равно попробую expand-root, затем повторю установку."
+      set_state 35
+    fi
   fi
 
-  if [ "$MODE" = "2" ] || [ "$MODE" = "3" ]; then
-    [ "$st" -lt 80 ] && install_wireguard         && set_state 80
-    [ "$st" -lt 90 ] && configure_wireguard_server && set_state 90
-    # для режима 3 — мягко допатчим podkop, чтобы wg0 тоже ходил через подкоп
-    [ "$MODE" = "3" ] && [ "$st" -lt 95 ] && patch_podkop_add_wg0_only && set_state 95
+  [ "$st" -lt 45 ] && check_space_overlay && set_state 45
 
-    # peers / QR
-    if [ "$st" -lt 100 ]; then
+  # --- expand-root AFTER packages (as requested) — will reboot
+  [ "$st" -lt 50 ] && expand_root_prep && set_state 50
+  [ "$st" -lt 60 ] && expand_root_run_and_reboot && set_state 60
+
+  # --- after reboot: ensure packages are installed
+  [ "$st" -lt 70 ] && install_full_pkg_list && set_state 70
+  [ "$st" -lt 75 ] && check_space_overlay   && set_state 75
+
+  # --- Podkop
+  if [ "$MODE" = "1" ] || [ "$MODE" = "2" ]; then
+    [ "$st" -lt 80 ] && install_podkop        && set_state 80
+    [ "$st" -lt 90 ] && configure_podkop_full && set_state 90
+  fi
+
+  # --- WireGuard
+  if [ "$MODE" = "2" ] || [ "$MODE" = "3" ]; then
+    [ "$st" -lt 100 ] && install_wireguard          && set_state 100
+    [ "$st" -lt 110 ] && configure_wireguard_server && set_state 110
+    [ "$MODE" = "3" ] && [ "$st" -lt 115 ] && patch_podkop_add_wg0_only && set_state 115
+
+    # peers/QR
+    if [ "$st" -lt 120 ]; then
       ask "Сколько клиентов WireGuard создать сейчас?" PEERS "1"
       i=1
       while [ "$i" -le "$PEERS" ]; do
@@ -301,7 +355,7 @@ main() {
         create_peer "$name" "$ip"
         i=$((i+1))
       done
-      set_state 100
+      set_state 120
     fi
   fi
 
