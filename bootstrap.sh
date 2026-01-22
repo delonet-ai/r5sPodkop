@@ -13,11 +13,78 @@ TTY="/dev/tty"
 GREEN="\033[1;32m"; RED="\033[1;31m"; YELLOW="\033[1;33m"; NC="\033[0m"
 
 say()   { printf "%b\n" "$*"; }
-done_() { say "${GREEN}DONE${NC}  $*"; sleep 5; }
+done_() {
+  say "${GREEN}DONE${NC}  $*"
+  print_progress
+  sleep 5
+}
 info()  { say "${YELLOW}INFO${NC}  $*"; }
 warn()  { say "${YELLOW}WARN${NC}  $*"; sleep 5; }
 fail()  { say "${RED}FAIL${NC}  $*"; exit 1; }
 log()   { echo "[$(date +'%F %T')] $*" >> "$LOG"; }
+
+print_banner() {
+  say ""
+  say "╔══════════════════════════════════════════════════════════════╗"
+  say "║                      R5S / R5C Bootstrap                     ║"
+  say "╠══════════════════════════════════════════════════════════════╣"
+  say "║ Этот скрипт с любовью разработал для тебя delonet-ai.         ║"
+  say "║ Просто следуй шагам. Если что-то пошло не так —               ║"
+  say "║ перезапускай скрипт. У тебя все получится 💪                  ║"
+  say "╚══════════════════════════════════════════════════════════════╝"
+  say ""
+}
+
+# Определяем, какой большой шаг считается "текущим" по state.
+# Возвращает индекс этапа 0..N
+progress_stage() {
+  st="$1"
+  if   [ "$st" -lt 10  ]; then echo 0
+  elif [ "$st" -lt 20  ]; then echo 1
+  elif [ "$st" -lt 30  ]; then echo 2
+  elif [ "$st" -lt 40  ]; then echo 3
+  elif [ "$st" -lt 75  ]; then echo 4
+  elif [ "$st" -lt 80  ]; then echo 5
+  elif [ "$st" -lt 90  ]; then echo 6
+  elif [ "$st" -lt 110 ]; then echo 7
+  else echo 8
+  fi
+}
+
+# Красивый вывод статуса этапа
+_stage_line() {
+  idx="$1"; cur="$2"; title="$3"
+  if [ "$idx" -lt "$cur" ]; then
+    say "  ${GREEN}✅${NC} $title"
+  elif [ "$idx" -eq "$cur" ]; then
+    say "  ${YELLOW}⏳${NC} $title"
+  else
+    say "  ⬜ $title"
+  fi
+}
+
+print_progress() {
+  st="$(get_state)"
+  cur="$(progress_stage "$st")"
+
+  say ""
+  say "┌──────────────────────── Прогресс ────────────────────────────┐"
+  _stage_line 0 "$cur" "Preflight (версия / интернет / время)"
+  _stage_line 1 "$cur" "Установка пакетов (полный список)"
+  _stage_line 2 "$cur" "Проверка/выбор expand-root"
+  _stage_line 3 "$cur" "Expand-root (resize → reboot)"
+  _stage_line 4 "$cur" "Пакеты после resize + проверка места"
+  _stage_line 5 "$cur" "Установка Podkop"
+  _stage_line 6 "$cur" "Настройка Podkop (VLESS + community_lists)"
+  _stage_line 7 "$cur" "WireGuard (установка + сервер)"
+  _stage_line 8 "$cur" "Peers + QR (клиенты)"
+  say "└──────────────────────────────────────────────────────────────┘"
+  say "State: $st"
+  say ""
+}
+
+
+
 
 get_state(){ [ -f "$STATE" ] && cat "$STATE" || echo "0"; }
 set_state(){ echo "$1" > "$STATE"; sync; }
@@ -341,8 +408,11 @@ main() {
   [ -f "$CONF" ] || menu
   load_conf
 
-  st="$(get_state)"
-  log "state=$st mode=$MODE"
+ st="$(get_state)"
+log "state=$st mode=$MODE"
+
+print_banner
+print_progress
 
   # --- preflight
   [ "$st" -lt 10 ] && check_openwrt && set_state 10
