@@ -362,12 +362,25 @@ main() {
   [ "$st" -lt 45 ] && check_space_overlay && set_state 45
 
   # --- expand-root AFTER packages (as requested) — will reboot
-  [ "$st" -lt 50 ] && expand_root_prep && set_state 50
+   # Решаем, нужен ли expand-root
+  if [ "$st" -lt 50 ]; then
+    if overlay_report_and_ask_expand; then
+      expand_root_prep
+      set_state 50
+    else
+      done_ "Пропускаю expand-root по выбору пользователя"
+      # перепрыгиваем шаги expand-root + пост-установка пакетов
+      set_state 75
+    fi
+  fi
+
+  # Если expand-root всё же выбран — запускаем и уходим в reboot
   [ "$st" -lt 60 ] && expand_root_run_and_reboot && set_state 60
 
-  # --- after reboot: ensure packages are installed
+  # После ребута (или если expand-root был нужен) — повторим установку пакетов и покажем место
   [ "$st" -lt 70 ] && install_full_pkg_list && set_state 70
   [ "$st" -lt 75 ] && check_space_overlay   && set_state 75
+
 
   # --- Podkop
   if [ "$MODE" = "1" ] || [ "$MODE" = "2" ]; then
