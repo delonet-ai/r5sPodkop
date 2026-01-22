@@ -140,11 +140,19 @@ expand_root_run_and_reboot() {
 
 # -------------------- PODKOP --------------------
 install_podkop() {
-  # Use pipe for ash (not bash process substitution)
-  wget -qO- "https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh" | sh
+  url="https://raw.githubusercontent.com/itdoginfo/podkop/refs/heads/main/install.sh"
+  wget -qO /tmp/podkop-install.sh "$url"
+  chmod +x /tmp/podkop-install.sh
+
+  # ВАЖНО: заставляем install.sh читать ввод с терминала
+  if [ -r /dev/tty ]; then
+    sh /tmp/podkop-install.sh </dev/tty >/dev/tty 2>&1
+  else
+    fail "Нет /dev/tty. Запусти через интерактивный SSH или: ssh -t root@ip 'sh /tmp/bootstrap.sh'"
+  fi
+
   done_ "Podkop установлен/обновлён"
 }
-
 configure_podkop_full() {
   [ -n "${VLESS:-}" ] || fail "VLESS пустой. Запусти скрипт заново и введи VLESS (MODE 1/2)."
 
