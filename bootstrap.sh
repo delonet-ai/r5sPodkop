@@ -113,9 +113,17 @@ menu() {
   say "0) Basic setup (пакеты + expand-root)"
   say "1) Podkop"
   say "2) Podkop + WireGuard Private"
-  say "3) Доустановить WireGuard Private к Podkop"
-  ask "Ввод (0/1/2/3)" MODE "2"
-  case "$MODE" in 0|1|2|3) ;; *) fail "Неверный выбор MODE=$MODE" ;; esac
+ say "3) Доустановить WireGuard Private к Podkop"
+say "4) Управление WireGuard клиентами (создание/удаление/QR/конфиги)"
+ask "Ввод (0/1/2/3/4)" MODE "2"
+case "$MODE" in 0|1|2|3|4) ;; *) fail "Неверный выбор MODE=$MODE" ;; esac
+
+# Если выбрали управление WG — сразу открываем подменю и выходим
+if [ "$MODE" = "4" ]; then
+  load_conf 2>/dev/null || true
+  wg_manage_menu
+  exit 0
+fi
 
   VLESS=""
   LIST_RU="1"; LIST_CF="1"; LIST_META="1"; LIST_GOOGLE_AI="1"
@@ -427,6 +435,151 @@ EOF
   qrencode -t ansiutf8 < "$dir/$name.conf" || true
   done_ "Peer $name создан: $dir/$name.conf"
 }
+
+WG_NET_PREFIX="10.10.10"
+WG_SERVER_IP="${WG_NET_PREFIX}.1"
+WG_CLIENT_DIR="/etc/wireguard/clients"
+
+wg_clients_list() {
+  say ""
+  say "=== WireGuard клиенты (wg0) ==="
+  # Вывод: section | description | allowed_ips
+  uci show network 2>/dev/null | grep "=wireguard_wg0" | cut -d. -f2 | while read -r sec; do
+    desc="$(uci -q get network."$sec".description || true)"
+    ips="$(uci -q get network."$sec".allowed_ips || true)"
+    [ -z "$desc" ] && desc="(no description)"
+    say " - ${GREEN}${desc}${NC}  [$sec]  allowed_ips: ${ips:-none}"
+  done
+  say ""
+}
+
+wg_find_section_by_name() {
+  # prints section id by description match (exact)
+  name="$1"
+  uci show network 2>/dev/null | grep "=wireguard_wg0" | cut -d. -f2 | while read -r sec; do
+    desc="$(uci -q get network."$sec".description || true)"
+    [ "$desc" = "$name" ] && { echo "$sec"; break; }
+  done
+}
+
+wg_show_conf_text() {
+  name="$1"
+  file="$WG_CLIENT_DIR/$name.conf"
+  [ -f "$file" ] || fail "Файл конфига не найден: $file"
+  say ""
+  say "=== $file ==="
+  cat "$file"
+  say ""
+}
+
+wg_show_conf_qr() {
+  name="$1"
+  file="$WG_CLIENT_DIR/$name.conf"
+  [ -f "$file" ] || fail "Файл конфига не найден: $file"
+  say ""
+  say "${GREEN}QR (ANSI) для $name:${NC}"
+  qrencode -t ansiutf8 < "$file" || fail "qrencode не сработал (проверь пакет qrencode)"
+  say ""
+}
+
+wg_next_free_ip32() {
+  # Find next free 10.10.10.X/32 starting from .2
+  used="$(uci show network 2>/dev/null | grep "\.allowed_ips=" | sed -n "s/.*'\(${WG_NET_PREFIX}\.[0-9]\+\)\/32'.*/\1/p")"
+  i=2
+  while [ "$i" -le 254 ]; do
+    ip="${WG_NET_PREFIX}.${i}"
+    echo "$used" | grep -qx "$ip" || { echo "$ip/32"; return 0; }
+    i=$((i+1))
+  done
+  return 1
+}
+
+wg_create_client() {
+  mkdir -p "$WG_CLIENT_DIR"
+  [ -f /etc/wireguard/server.pub ] || fail "Не найден /etc/wireguard/server.pub (сервер WG не настроен?)"
+
+  ask "Имя нового клиента (латиница, без пробелов)" name ""
+  [ -n "$name" ] || fail "Имя пустое"
+  [ -f "$WG_CLIENT_DIR/$name.conf" ] && fail "Уже есть файл: $WG_CLIENT_DIR/$name.conf"
+
+  # если endpoint не задан — спросим и сохраним
+  if [ -z "${WG_ENDPOINT:-}" ]; then
+    ask "Endpoint для клиентов (например: 89.207.218.164:51820)" WG_ENDPOINT ""
+    sed -i "s|^WG_ENDPOINT=.*|WG_ENDPOINT=$WG_ENDPOINT|" "$CONF" 2>/dev/null || true
+  fi
+
+  ip32="$(wg_next_free_ip32)" || fail "Не нашёл свободный IP в ${WG_NET_PREFIX}.0/24"
+  umask 077
+  priv="$(wg genkey)"
+  pub="$(printf "%s" "$priv" | wg pubkey)"
+  psk="$(wg genpsk)"
+
+  sec="$(uci add network wireguard_wg0)"
+  uciq set "network.$sec.description=$name"
+  uciq set "network.$sec.public_key=$pub"
+  uciq set "network.$sec.preshared_key=$psk"
+  uciq add_list "network.$sec.allowed_ips=$ip32"
+  uciq set "network.$sec.persistent_keepalive=25"
+  uciq commit network
+  /etc/init.d/network restart >/dev/null 2>&1 || true
+
+  cat > "$WG_CLIENT_DIR/$name.conf" <<EOF
+[Interface]
+PrivateKey = $priv
+Address = ${ip32%/32}/32
+DNS = $WG_SERVER_IP
+
+[Peer]
+PublicKey = $(cat /etc/wireguard/server.pub)
+PresharedKey = $psk
+Endpoint = $WG_ENDPOINT
+AllowedIPs = 0.0.0.0/0, ::/0
+PersistentKeepalive = 25
+EOF
+
+  done_ "Клиент создан: $name ($ip32)"
+  wg_show_conf_qr "$name"
+}
+
+wg_delete_client() {
+  ask "Имя клиента для удаления" name ""
+  [ -n "$name" ] || fail "Имя пустое"
+
+  sec="$(wg_find_section_by_name "$name")"
+  [ -n "$sec" ] || fail "Не нашёл клиента '$name' в UCI (network.$sec)"
+
+  uciq delete network."$sec"
+  uciq commit network
+  /etc/init.d/network restart >/dev/null 2>&1 || true
+
+  rm -f "$WG_CLIENT_DIR/$name.conf" 2>/dev/null || true
+  done_ "Клиент удалён: $name"
+}
+
+wg_manage_menu() {
+  while true; do
+    say ""
+    say "=== Управление WireGuard (wg0) ==="
+    say "1) Показать список клиентов"
+    say "2) Показать QR для клиента"
+    say "3) Показать текстовый конфиг клиента"
+    say "4) Создать нового клиента"
+    say "5) Удалить клиента"
+    say "0) Назад"
+    ask "Выбор" act "1"
+
+    case "$act" in
+      1) wg_clients_list ;;
+      2) ask "Имя клиента" n ""; wg_show_conf_qr "$n" ;;
+      3) ask "Имя клиента" n ""; wg_show_conf_text "$n" ;;
+      4) wg_create_client ;;
+      5) wg_delete_client ;;
+      0) break ;;
+      *) warn "Неверный выбор" ;;
+    esac
+  done
+}
+
 
 # -------------------- MAIN --------------------
 main() {
