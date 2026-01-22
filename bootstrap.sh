@@ -248,6 +248,12 @@ install_podkop() {
   done_ "Podkop установлен/обновлён"
 }
 configure_podkop_full() {
+  # Если VLESS пустой — спросим заново и сохраним в конфиг, чтобы не падать
+  if [ -z "${VLESS:-}" ]; then
+    warn "VLESS пустой — сейчас спрошу заново."
+    ask "Вставь строку VLESS (одной строкой)" VLESS ""
+    sed -i "s|^VLESS=.*|VLESS=$VLESS|" "$CONF" 2>/dev/null || true
+  fi
   [ -n "${VLESS:-}" ] || fail "VLESS пустой. Запусти скрипт заново и введи VLESS (MODE 1/2)."
 
   # settings section
@@ -269,7 +275,7 @@ configure_podkop_full() {
   uciq set podkop.settings.shutdown_correctly='0'
 
   # source_network_interfaces: br-lan always; wg0 if WG enabled
-  uciq -q del podkop.settings.source_network_interfaces
+   uciq -q del podkop.settings.source_network_interfaces
   uciq add_list podkop.settings.source_network_interfaces='br-lan'
   if [ "$MODE" = "2" ] || [ "$MODE" = "3" ]; then
     uciq add_list podkop.settings.source_network_interfaces='wg0'
@@ -322,39 +328,58 @@ configure_wireguard_server() {
     wg genkey | tee /etc/wireguard/server.key | wg pubkey > /etc/wireguard/server.pub
   fi
 
+  # wg0 как на эталоне: 10.10.10.1/24, порт 51820, defaultroute=0
   uciq set network.wg0='interface'
   uciq set network.wg0.proto='wireguard'
   uciq set network.wg0.private_key="$(cat /etc/wireguard/server.key)"
   uciq set network.wg0.listen_port='51820'
+  uciq set network.wg0.defaultroute='0'
   uciq -q del network.wg0.addresses
-  uciq add_list network.wg0.addresses='10.7.0.1/24'
+  uciq add_list network.wg0.addresses='10.10.10.1/24'
   uciq commit network
 
-  # firewall zone + allow inbound + forwarding wg -> wan
-  uciq set firewall.wg='zone'
-  uciq set firewall.wg.name='wg'
-  uciq set firewall.wg.input='ACCEPT'
-  uciq set firewall.wg.output='ACCEPT'
-  uciq set firewall.wg.forward='ACCEPT'
-  uciq -q del firewall.wg.network
-  uciq add_list firewall.wg.network='wg0'
+  # Убираем (если вдруг остались) нашу старую зону wg и forwarding wg->wan
+  uci -q delete firewall.wg >/dev/null 2>&1 || true
+  uci -q delete firewall.wg_wan >/dev/null 2>&1 || true
+  uci -q delete firewall.wg_in >/dev/null 2>&1 || true
 
-  uciq set firewall.wg_in='rule'
-  uciq set firewall.wg_in.name='Allow-WireGuard-Inbound'
-  uciq set firewall.wg_in.src='wan'
-  uciq set firewall.wg_in.proto='udp'
-  uciq set firewall.wg_in.dest_port='51820'
-  uciq set firewall.wg_in.target='ACCEPT'
+  # Добавляем wg0 в зону LAN (как на эталоне)
+  # (на чистом OpenWrt зона обычно называется firewall.@zone[0] с name='lan',
+  #  но аккуратнее найти по имени)
+  lan_zone="$(uci show firewall | grep "=zone" | cut -d. -f2 | while read -r z; do
+    name="$(uci -q get firewall."$z".name || true)"
+    [ "$name" = "lan" ] && echo "$z" && break
+  done)"
 
-  uciq set firewall.wg_wan='forwarding'
-  uciq set firewall.wg_wan.src='wg'
-  uciq set firewall.wg_wan.dest='wan'
+  [ -n "$lan_zone" ] || fail "Не нашёл firewall zone 'lan'"
+
+  # Добавим wg0 в список networks зоны lan (если ещё нет)
+  if ! uci -q get firewall."$lan_zone".network 2>/dev/null | grep -qw 'wg0'; then
+    uciq add_list firewall."$lan_zone".network='wg0'
+  fi
+
+  # Правило входа WireGuard с WAN: UDP/51820 (как на эталоне)
+  uciq set firewall.wg_allow='rule'
+  uciq set firewall.wg_allow.name='Allow-WireGuard-Inbound'
+  uciq set firewall.wg_allow.src='wan'
+  uciq set firewall.wg_allow.proto='udp'
+  uciq set firewall.wg_allow.dest_port='51820'
+  uciq set firewall.wg_allow.target='ACCEPT'
+
+  # (опционально) гарантируем наличие forwarding lan->wan
+  # на чистом OpenWrt оно обычно есть, но добавим, если отсутствует
+  has_fwd="$(uci show firewall | grep "=forwarding" | grep -q "src='lan'.*dest='wan'" && echo 1 || echo 0)"
+  if [ "$has_fwd" = "0" ]; then
+    f="$(uci add firewall forwarding)"
+    uciq set firewall."$f".src='lan'
+    uciq set firewall."$f".dest='wan'
+  fi
 
   uciq commit firewall
   /etc/init.d/network restart >/dev/null 2>&1 || true
   /etc/init.d/firewall restart >/dev/null 2>&1 || true
 
-  done_ "WireGuard сервер wg0 настроен (порт 51820, 10.7.0.1/24)"
+  done_ "WireGuard сервер wg0 настроен как на эталоне (wg0 в зоне lan)"
 }
 
 create_peer() {
@@ -386,8 +411,8 @@ create_peer() {
   cat > "$dir/$name.conf" <<EOF
 [Interface]
 PrivateKey = $priv
-Address = ${ip%/32}/24
-DNS = 1.1.1.1
+Address = ${ip%/32}/32
+DNS = 10.10.10.1
 
 [Peer]
 PublicKey = $(cat /etc/wireguard/server.pub)
@@ -470,7 +495,7 @@ print_progress
       i=1
       while [ "$i" -le "$PEERS" ]; do
         name="peer$i"
-        ip="10.7.0.$((i+1))/32"
+        ip="10.10.10.$((i+1))/32"
         create_peer "$name" "$ip"
         i=$((i+1))
       done
