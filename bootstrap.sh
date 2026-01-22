@@ -113,6 +113,33 @@ install_full_pkg_list() {
   done_ "Установлен полный список пакетов"
 }
 
+overlay_report_and_ask_expand() {
+  # Показываем размер overlay (это то, что реально важно для пакетов)
+  # total_kb used_kb avail_kb
+  set -- $(df -k /overlay 2>/dev/null | awk 'NR==2 {print $2, $3, $4}')
+  total_kb="${1:-0}"; used_kb="${2:-0}"; avail_kb="${3:-0}"
+
+  total_mb=$((total_kb/1024))
+  used_mb=$((used_kb/1024))
+  avail_mb=$((avail_kb/1024))
+
+  say ""
+  say "Overlay (место под пакеты): всего ${total_mb}MB, занято ${used_mb}MB, свободно ${avail_mb}MB"
+  say ""
+
+  # Дефолт: если overlay уже >= 1024MB, то обычно expand-root не нужен
+  def="y"
+  [ "$total_mb" -ge 1024 ] && def="n"
+
+  ask "Делать expand-root? (y/n)" DO_EXPAND "$def"
+  case "$DO_EXPAND" in
+    y|Y) return 0 ;;
+    n|N) return 1 ;;
+    *) fail "Введи y или n" ;;
+  esac
+}
+
+
 check_space_overlay() {
   free_kb="$(df -k /overlay 2>/dev/null | awk 'NR==2 {print $4}')"
   [ -n "$free_kb" ] || fail "Не вижу /overlay"
