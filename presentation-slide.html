@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Слайд: текущая работа и фокус доработок</title>
+    <style>
+      :root {
+        --grad-main: linear-gradient(135deg, #c81d25 0%, #7e1f86 45%, #1f5fff 100%);
+        --grad-card: linear-gradient(160deg, rgba(200, 29, 37, 0.22), rgba(31, 95, 255, 0.2));
+        --text-main: #f5f8ff;
+        --text-muted: #d8e1ff;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        font-family: "Inter", "Segoe UI", Arial, sans-serif;
+        background: #090d1a;
+        display: grid;
+        place-items: center;
+        min-height: 100vh;
+        color: var(--text-main);
+      }
+
+      .slide {
+        width: 1280px;
+        height: 720px;
+        background: var(--grad-main);
+        border-radius: 28px;
+        padding: 34px 42px;
+        position: relative;
+        overflow: hidden;
+        box-shadow: 0 25px 70px rgba(0, 0, 0, 0.45);
+      }
+
+      .slide::before,
+      .slide::after {
+        content: "";
+        position: absolute;
+        border-radius: 50%;
+        filter: blur(6px);
+        opacity: 0.25;
+      }
+
+      .slide::before {
+        width: 330px;
+        height: 330px;
+        background: #ff7a85;
+        top: -120px;
+        left: -80px;
+      }
+
+      .slide::after {
+        width: 380px;
+        height: 380px;
+        background: #6aa5ff;
+        right: -110px;
+        bottom: -130px;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 44px;
+        letter-spacing: 0.2px;
+      }
+
+      .subtitle {
+        margin-top: 8px;
+        font-size: 20px;
+        color: var(--text-muted);
+      }
+
+      .grid {
+        margin-top: 22px;
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 18px;
+      }
+
+      .card {
+        background: var(--grad-card);
+        border: 1px solid rgba(255, 255, 255, 0.24);
+        backdrop-filter: blur(2px);
+        border-radius: 16px;
+        padding: 14px 18px;
+      }
+
+      .card h2 {
+        margin: 0 0 8px;
+        font-size: 24px;
+      }
+
+      .card ul {
+        margin: 0;
+        padding-left: 20px;
+        line-height: 1.35;
+        font-size: 17px;
+      }
+
+      .card li + li {
+        margin-top: 4px;
+      }
+
+      .kpi {
+        margin-top: 20px;
+        display: flex;
+        gap: 14px;
+      }
+
+      .pill {
+        background: rgba(7, 12, 27, 0.34);
+        border: 1px solid rgba(255, 255, 255, 0.35);
+        border-radius: 999px;
+        padding: 8px 14px;
+        font-size: 16px;
+      }
+
+      strong { color: #ffffff; }
+    </style>
+  </head>
+  <body>
+    <section class="slide">
+      <h1>Чем занимаемся сейчас и что усиливаем</h1>
+      <div class="subtitle">Текущий статус и фокус доработок</div>
+
+      <div class="grid">
+        <article class="card">
+          <h2>Сейчас в работе</h2>
+          <ul>
+            <li>Задачи по <strong>ИИ, RPA и чат-ботам</strong>.</li>
+            <li>Работа с метриками <strong>CSAT / CSI</strong>.</li>
+            <li><strong>Матрицы грейдирования</strong> и единый <strong>дашборд</strong> в одном окне.</li>
+            <li><strong>Поддержка пользователей</strong> и клиентских систем.</li>
+            <li>Обучение менеджеров работе с <strong>ЛК сайта и порталом</strong>.</li>
+            <li>Поддержка логистики и сбор данных для обучения сотрудников ОТП.</li>
+          </ul>
+        </article>
+
+        <article class="card">
+          <h2>Фокус на доработки</h2>
+          <ul>
+            <li>Автовыполнение заявок на отчёты по логистическим системам.</li>
+            <li>Аналитика возможностей применения <strong>RPA</strong>.</li>
+            <li>Продажа сильно б/у техники сотрудникам: освобождаем склад и формируем «кешбек» на новые устройства.</li>
+            <li>Поставки: работа с CSI поставщиков — цель <strong>≥ 4.5</strong> (сейчас <strong>3.9</strong>), проводим РГ ЛКП.</li>
+            <li>Доработки отчёта по ОС.</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="kpi">
+        <div class="pill">CSI поставщиков: <strong>3.9 → 4.5+</strong></div>
+        <div class="pill">Приоритет: <strong>Автоматизация + Прозрачная отчётность</strong></div>
+      </div>
+    </section>
+  </body>
+</html>
